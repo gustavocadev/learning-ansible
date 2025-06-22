@@ -1,0 +1,146 @@
+---
+- name: Wordpress example
+  hosts: demo
+  become: true
+  gather_facts: false
+  tasks:
+    - name: update packages
+      ansible.builtin.apt:
+        update_cache: yes
+        upgrade: yes
+
+    - name: install apache 2
+      ansible.builtin.apt:
+        name: apache2
+        state: present
+
+    - name: start apache service
+      ansible.builtin.systemd_service:
+        name: apache2
+        # by default, the apache service is not started after installation
+        state: started
+        # iniciar automaticamente servidor apache
+        enabled: true
+
+    - name: Install PHP dependecies
+      ansible.builtin.apt:
+        name: '{{ item }}'
+        state: present
+      loop:
+        - php
+        - php-common
+        - php-mysql
+        - php-xml
+        - php-xmlrpc
+        - php-curl
+        - php-gd
+        - php-imagick
+        - php-cli
+        - php-dev
+        - php-dev
+        - php-imap
+        - php-mbstring
+        - php-opcache
+        - php-soap
+        - php-zip
+        - php-intl
+    - name: Install Maria db
+      ansible.builtin.apt:
+        name: '{{item}}'
+        state: present
+      loop:
+        - mariadb-server
+        - mariadb-client
+
+    - name: Start maria db
+      ansible.builtin.systemd_service:
+        name: mariadb
+        state: started
+        enabled: true
+
+    - name: Python dependencies
+      ansible.builtin.apt:
+        name:
+          - python3-pip
+          - python3-dev
+          - libmysqlclient-dev
+        state: present
+
+    - name: Ignore PEP 668 because it's silly.
+      ansible.builtin.file:
+        path: /usr/lib/python3.12/EXTERNALLY-MANAGED
+        state: absent
+
+    - name: Install mysqlclient via Pip
+      ansible.builtin.pip:
+        name: mysqlclient
+        state: present
+
+    # Because in linux by default the root user has no password, we need to set it
+    - name: Set MariaDB root password
+      community.mysql.mysql_user:
+        login_user: root # Me conecto como root
+        login_password: '' # No tengo contraseña porque es la primera vez que me conecto, osea la contraseña es vacía
+
+        # Ahora le asigno una contraseña al usuario root
+        name: root # ¿A que usuario queremos asignar la contraseña?
+        password: 'password' # This is the password I want to set for the root user
+        host: localhost # I want to set the password for the root user that connects from localhost
+        priv: '*.*:ALL,GRANT' # I want to give the root user all privileges on all databases and tables, and also the ability to grant privileges to other users
+        state: present # I want to ensure that the root user exists with the specified password and privileges
+      ignore_errors: true
+
+    - name: Disallow root login remotely
+      community.mysql.mysql_user:
+        name: root
+        host: '{{ item }}'
+        login_user: root
+        login_password: 'password'
+        state: absent
+      loop:
+        # - '{{ ansible_hostname }}'
+        - '::1'
+        - '127.0.0.1'
+        - '%'
+
+    # By default, MySQL creates a test database that is accessible to all users. We will remove it for security reasons.
+    - name: Remove test database
+      community.mysql.mysql_db:
+        name: test
+        state: absent
+        login_user: root
+        login_password: 'password'
+
+    - name: Reload privilege tables
+      # -ppassword, the first p is the flag for password, and the second p is the password itself, it is not a typo
+      ansible.builtin.command: mysql -u root -ppassword -e "FLUSH PRIVILEGES;"
+
+    # I create a database for Wordpress and a user with privileges to that database
+    - name: Add Wordpress database
+      community.mysql.mysql_db:
+        name: wordpress_db # I create a database called wordpress_db
+        state: present
+        login_user: root # I connect as root
+        login_password: 'password'
+
+    - name: Add wordpress user and password
+      community.mysql.mysql_user:
+        name: wordpress
+        password: 'wordpress_pwd'
+        host: localhost
+        login_user: root
+        login_password: 'password'
+        priv: 'wordpress_db.*:ALL,GRANT'
+        state: present
+      ignore_errors: true
+
+    - name: Download Wordpress
+      ansible.builtin.get_url:
+        url: https://wordpress.org/latest.tar.gz
+        dest: /tmp/latest.tar.gz
+
+    - name: Unarchive Wordpress
+      ansible.builtin.unarchive:
+        src: /tmp/latest.tar.gz
+        dest: /var/www/html/
+        remote_src: yes
