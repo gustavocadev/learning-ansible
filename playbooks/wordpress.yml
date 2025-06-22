@@ -3,6 +3,11 @@
   hosts: demo
   become: true
   gather_facts: false
+  vars:
+    mariadb_root_password: 'password'
+    wp_db_name: 'wordpress_db'
+    wp_user: 'wordpress'
+    wp_password: 'wordpress_pwd'
   tasks:
     - name: update packages
       ansible.builtin.apt:
@@ -84,7 +89,7 @@
 
         # Ahora le asigno una contraseña al usuario root
         name: root # ¿A que usuario queremos asignar la contraseña?
-        password: 'password' # This is the password I want to set for the root user
+        password: '{{ mariadb_root_password }}' # This is the password I want to set for the root user
         host: localhost # I want to set the password for the root user that connects from localhost
         priv: '*.*:ALL,GRANT' # I want to give the root user all privileges on all databases and tables, and also the ability to grant privileges to other users
         state: present # I want to ensure that the root user exists with the specified password and privileges
@@ -95,7 +100,7 @@
         name: root
         host: '{{ item }}'
         login_user: root
-        login_password: 'password'
+        login_password: '{{ mariadb_root_password }}'
         state: absent
       loop:
         # - '{{ ansible_hostname }}'
@@ -109,27 +114,27 @@
         name: test
         state: absent
         login_user: root
-        login_password: 'password'
+        login_password: '{{ mariadb_root_password }}'
 
     - name: Reload privilege tables
       # -ppassword, the first p is the flag for password, and the second p is the password itself, it is not a typo
-      ansible.builtin.command: mysql -u root -ppassword -e "FLUSH PRIVILEGES;"
+      ansible.builtin.command: mysql -u root -p"{{ mariadb_root_password }}" -e "FLUSH PRIVILEGES;"
 
     # I create a database for Wordpress and a user with privileges to that database
     - name: Add Wordpress database
       community.mysql.mysql_db:
-        name: wordpress_db # I create a database called wordpress_db
+        name: '{{  wp_db_name }}' # I create a database called wordpress_db
         state: present
         login_user: root # I connect as root
-        login_password: 'password'
+        login_password: '{{ mariadb_root_password }}' # I use the root password to connect
 
     - name: Add wordpress user and password
       community.mysql.mysql_user:
-        name: wordpress
-        password: 'wordpress_pwd'
+        name: '{{ wp_user }}'
+        password: '{{wp_password}}'
         host: localhost
         login_user: root
-        login_password: 'password'
+        login_password: '{{ mariadb_root_password }}'
         priv: 'wordpress_db.*:ALL,GRANT'
         state: present
       ignore_errors: true
@@ -144,3 +149,65 @@
         src: /tmp/latest.tar.gz
         dest: /var/www/html/
         remote_src: yes
+
+    - name: Generate wordpress config
+      ansible.builtin.copy:
+        remote_src: yes
+        src: /var/www/html/wordpress/wp-config-sample.php
+        dest: /var/www/html/wordpress/wp-config.php
+
+    - name: Change wordpress permissions
+      ansible.builtin.file:
+        path: /var/www/html/wordpress
+        mode: 0755
+        owner: www-data
+        group: www-data
+
+    - name: 'Change wp-config'
+      ansible.builtin.lineinfile:
+        path: /var/www/html/wordpress/wp-config.php
+        regexp: '{{ item.regexp }}' # This is the regular expression to search for
+        # If the line is not found, it will be added
+        # If the line is found, it will be replaced with the new line because of state: present
+        line: '{{ item.line }}'
+        state: present
+      loop:
+        - regexp: 'database_name_here'
+          line: "define( 'DB_NAME', '{{wp_db_name}}' );"
+
+        - regexp: 'username_here'
+          line: "define( 'DB_USER', '{{wp_user}}' );"
+
+        - regexp: 'password_here'
+          line: "define( 'DB_PASSWORD', '{{wp_password}}' );"
+
+    - name: Download WordPress keys
+      ansible.builtin.shell: |
+        curl -s https://api.wordpress.org/secret-key/1.1/salt/ >> /var/www/html/wordpress/wp-config.php
+
+    # We need to generate the Apache configuration file for Wordpress because the default one is not suitable for Wordpress
+    - name: Generate wordpress apache conf
+      ansible.builtin.copy:
+        remote_src: yes
+        src: /etc/apache2/sites-available/000-default.conf
+        dest: /etc/apache2/sites-available/wordpress.conf
+
+    - name: Change wordpress DocumentRoot
+      ansible.builtin.lineinfile:
+        path: /etc/apache2/sites-available/wordpress.conf
+        regexp: '/var/www/html'
+        line: '        DocumentRoot /var/www/html/wordpress'
+        state: present
+
+    - name: Enable wordpress site
+      ansible.builtin.shell:
+        cmd: |
+          a2ensite wordpress.conf
+          a2dissite 000-default.conf
+      args:
+        chdir: /etc/apache2/sites-available
+
+    - name: Restart apache service
+      ansible.builtin.systemd_service:
+        name: apache2
+        state: restarted
